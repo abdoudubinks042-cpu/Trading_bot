@@ -1,0 +1,17 @@
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+class Config:
+    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "REMPLACE_PAR_TON_TOKEN")
+    TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
+    NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
+    TRADINGVIEW_WEBHOOK_SECRET = os.getenv("TV_WEBHOOK_SECRET", "")
+    DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "EURUSD", "XAUUSD"]
+    STOP_LOSS_PCT = 0.01
+    TAKE_PROFIT_1 = 0.05
+    TAKE_PROFIT_2 = 0.10
+    SIGNAL_STRENGTH_THRESHOLD = 4
+    AUTO_SIGNAL_INTERVAL_HOURS = 1
+    WEBHOOK_HOST = "0.0.0.0"
+    WEBHOOK_PORT = 8080
