@@ -1,101 +1,109 @@
-import asyncio
-import aiohttp
 import logging
 from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
 from config import Config
+from analyzer import MarketAnalyzer
+from news_fetcher import NewsFetcher
 
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class MarketAnalyzer:
-    def __init__(self):
-        self.session = None
-        self.cache = {}
-        self.cache_ttl = 60
+analyzer = MarketAnalyzer()
+news_fetcher = NewsFetcher()
+subscribers = set()
+user_watchlists = {}
 
-    async def _get_session(self):
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
-        return self.session
+def format_signal(signal):
+    if not signal:
+        return "Signal indisponible"
+    d = signal.get('direction', 'NEUTRE')
+    emoji = "BUY" if d == "BUY" else "SELL" if d == "SELL" else "NEUTRE"
+    bar = "X" * signal.get('strength', 0) + "." * (5 - signal.get('strength', 0))
+    return (
+        f"{emoji} {signal['symbol']}\n"
+        f"Prix: {signal.get('price','N/A')}\n"
+        f"Stop Loss: {signal.get('sl','N/A')} (-1%)\n"
+        f"TP1: {signal.get('tp1','N/A')} (+5%)\n"
+        f"TP2: {signal.get('tp2','N/A')} (+10%)\n"
+        f"Force: [{bar}] {signal.get('strength',0)}/5\n"
+        f"Heure: {signal.get('timestamp','')}"
+    )
 
-    async def get_price(self, symbol):
-        try:
-            session = await self._get_session()
-            url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    return {
-                        'price': float(data['lastPrice']),
-                        'change': float(data['priceChangePercent']),
-                        'high': float(data['highPrice']),
-                        'low': float(data['lowPrice']),
-                        'volume': float(data['volume']),
-                    }
-        except Exception as e:
-            logger.error(f"Price error {symbol}: {e}")
-        return None
+def format_news(news):
+    if not news:
+        return "Aucune news disponible"
+    msg = "Dernieres News\n\n"
+    for item in news[:5]:
+        s = "HAUSSE" if item.get('sentiment') == 'positive' else "BAISSE" if item.get('sentiment') == 'negative' else "NEUTRE"
+        msg += f"{s} - {item.get('title','')}\n{item.get('url','')}\n{item.get('time','')}\n\n"
+    return msg
 
-    async def get_signal(self, symbol):
-        try:
-            data = await self.get_price(symbol)
-            if not data:
-                return {'symbol': symbol, 'direction': 'NEUTRE', 'strength': 0, 'timestamp': datetime.now().strftime('%H:%M %d/%m/%Y')}
+def start(update: Update, context: CallbackContext):
+    chat_id = update.effective_chat.id
+    subscribers.add(chat_id)
+    if chat_id not in user_watchlists:
+        user_watchlists[chat_id] = Config.DEFAULT_SYMBOLS.copy()
+    keyboard = [
+        [InlineKeyboardButton("Signal Maintenant", callback_data="signal_now"),
+         InlineKeyboardButton("Dernieres News", callback_data="news_now")],
+        [InlineKeyboardButton("Analyse Complete", callback_data="full_analysis")],
+    ]
+    update.message.reply_text(
+        "TradingSignal Pro\n\nStop Loss: 1%\nTake Profit: 5% et 10%\n\nChoisis une action:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-            price = data['price']
-            change = data['change']
-            high = data['high']
-            low = data['low']
+def signal_command(update: Update, context: CallbackContext):
+    chat_id = update.effective_chat.id
+    subscribers.add(chat_id)
+    symbols = user_watchlists.get(chat_id, Config.DEFAULT_SYMBOLS)
+    import asyncio
+    loop = asyncio.new_event_loop()
+    for symbol in symbols[:3]:
+        signal = loop.run_until_complete(analyzer.get_signal(symbol))
+        update.message.reply_text(format_signal(signal))
+    loop.close()
 
-            # Signal basé sur le % de changement 24h et position dans le range
-            score = 0
-            range_size = high - low if high != low else 1
-            position = (price - low) / range_size
+def news_command(update: Update, context: CallbackContext):
+    import asyncio
+    loop = asyncio.new_event_loop()
+    news = loop.run_until_complete(news_fetcher.get_latest_news())
+    loop.close()
+    update.message.reply_text(format_news(news), disable_web_page_preview=True)
 
-            if change > 3: score += 2
-            elif change > 1: score += 1
-            elif change < -3: score -= 2
-            elif change < -1: score -= 1
+def button_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    chat_id = query.message.chat_id
+    data = query.data
+    import asyncio
+    loop = asyncio.new_event_loop()
+    if data == "signal_now":
+        symbols = user_watchlists.get(chat_id, Config.DEFAULT_SYMBOLS)
+        for symbol in symbols[:3]:
+            signal = loop.run_until_complete(analyzer.get_signal(symbol))
+            query.message.reply_text(format_signal(signal))
+    elif data == "news_now":
+        news = loop.run_until_complete(news_fetcher.get_latest_news())
+        query.message.reply_text(format_news(news), disable_web_page_preview=True)
+    elif data == "full_analysis":
+        symbols = user_watchlists.get(chat_id, Config.DEFAULT_SYMBOLS[:2])
+        for sym in symbols[:2]:
+            signal = loop.run_until_complete(analyzer.get_signal(sym))
+            query.message.reply_text(format_signal(signal))
+    loop.close()
 
-            if position < 0.3: score += 1
-            elif position > 0.7: score -= 1
+def main():
+    updater = Updater(Config.TELEGRAM_TOKEN)
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("signal", signal_command))
+    dp.add_handler(CommandHandler("news", news_command))
+    dp.add_handler(CallbackQueryHandler(button_callback))
+    logger.info("Bot demarre!")
+    updater.start_polling()
+    updater.idle()
 
-            direction = 'BUY' if score >= 2 else 'SELL' if score <= -2 else 'NEUTRE'
-            strength = min(5, abs(score) + 1)
-
-            if direction == 'BUY':
-                sl = round(price * 0.99, 4)
-                tp1 = round(price * 1.05, 4)
-                tp2 = round(price * 1.10, 4)
-            elif direction == 'SELL':
-                sl = round(price * 1.01, 4)
-                tp1 = round(price * 0.95, 4)
-                tp2 = round(price * 0.90, 4)
-            else:
-                sl = tp1 = tp2 = price
-
-            return {
-                'symbol': symbol,
-                'direction': direction,
-                'price': round(price, 4),
-                'sl': sl, 'tp1': tp1, 'tp2': tp2,
-                'strength': strength,
-                'change': change,
-                'timeframe': '24H',
-                'timestamp': datetime.now().strftime('%H:%M %d/%m/%Y'),
-            }
-        except Exception as e:
-            logger.error(f"Signal error {symbol}: {e}")
-            return {'symbol': symbol, 'direction': 'NEUTRE', 'strength': 0, 'timestamp': datetime.now().strftime('%H:%M %d/%m/%Y')}
-
-    async def get_detailed_analysis(self, symbol):
-        data = await self.get_price(symbol)
-        if not data:
-            return {}
-        change = data['change']
-        return {
-            'change_24h': f"{change:+.2f}%",
-            'high_24h': data['high'],
-            'low_24h': data['low'],
-            'trend': "📈 HAUSSIÈRE" if change > 0 else "📉 BAISSIÈRE",
-            'volume_trend': "📈 Actif" if data['volume'] > 1000 else "→ Normal",
-        }
+if __name__ == '__main__':
+    main()
