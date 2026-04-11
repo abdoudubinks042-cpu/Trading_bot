@@ -1,12 +1,12 @@
+import asyncio
 import logging
-from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from config import Config
 from analyzer import MarketAnalyzer
 from news_fetcher import NewsFetcher
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 analyzer = MarketAnalyzer()
@@ -18,10 +18,9 @@ def format_signal(signal):
     if not signal:
         return "Signal indisponible"
     d = signal.get('direction', 'NEUTRE')
-    emoji = "BUY" if d == "BUY" else "SELL" if d == "SELL" else "NEUTRE"
     bar = "X" * signal.get('strength', 0) + "." * (5 - signal.get('strength', 0))
     return (
-        f"{emoji} {signal['symbol']}\n"
+        f"{d} {signal['symbol']}\n"
         f"Prix: {signal.get('price','N/A')}\n"
         f"Stop Loss: {signal.get('sl','N/A')} (-1%)\n"
         f"TP1: {signal.get('tp1','N/A')} (+5%)\n"
@@ -36,10 +35,10 @@ def format_news(news):
     msg = "Dernieres News\n\n"
     for item in news[:5]:
         s = "HAUSSE" if item.get('sentiment') == 'positive' else "BAISSE" if item.get('sentiment') == 'negative' else "NEUTRE"
-        msg += f"{s} - {item.get('title','')}\n{item.get('url','')}\n{item.get('time','')}\n\n"
+        msg += f"{s} - {item.get('title','')}\n{item.get('time','')}\n\n"
     return msg
 
-def start(update: Update, context: CallbackContext):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     subscribers.add(chat_id)
     if chat_id not in user_watchlists:
@@ -49,61 +48,50 @@ def start(update: Update, context: CallbackContext):
          InlineKeyboardButton("Dernieres News", callback_data="news_now")],
         [InlineKeyboardButton("Analyse Complete", callback_data="full_analysis")],
     ]
-    update.message.reply_text(
+    await update.message.reply_text(
         "TradingSignal Pro\n\nStop Loss: 1%\nTake Profit: 5% et 10%\n\nChoisis une action:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-def signal_command(update: Update, context: CallbackContext):
+async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     subscribers.add(chat_id)
     symbols = user_watchlists.get(chat_id, Config.DEFAULT_SYMBOLS)
-    import asyncio
-    loop = asyncio.new_event_loop()
     for symbol in symbols[:3]:
-        signal = loop.run_until_complete(analyzer.get_signal(symbol))
-        update.message.reply_text(format_signal(signal))
-    loop.close()
+        signal = await analyzer.get_signal(symbol)
+        await update.message.reply_text(format_signal(signal))
 
-def news_command(update: Update, context: CallbackContext):
-    import asyncio
-    loop = asyncio.new_event_loop()
-    news = loop.run_until_complete(news_fetcher.get_latest_news())
-    loop.close()
-    update.message.reply_text(format_news(news), disable_web_page_preview=True)
+async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    news = await news_fetcher.get_latest_news()
+    await update.message.reply_text(format_news(news), disable_web_page_preview=True)
 
-def button_callback(update: Update, context: CallbackContext):
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    query.answer()
+    await query.answer()
     chat_id = query.message.chat_id
     data = query.data
-    import asyncio
-    loop = asyncio.new_event_loop()
     if data == "signal_now":
         symbols = user_watchlists.get(chat_id, Config.DEFAULT_SYMBOLS)
         for symbol in symbols[:3]:
-            signal = loop.run_until_complete(analyzer.get_signal(symbol))
-            query.message.reply_text(format_signal(signal))
+            signal = await analyzer.get_signal(symbol)
+            await query.message.reply_text(format_signal(signal))
     elif data == "news_now":
-        news = loop.run_until_complete(news_fetcher.get_latest_news())
-        query.message.reply_text(format_news(news), disable_web_page_preview=True)
+        news = await news_fetcher.get_latest_news()
+        await query.message.reply_text(format_news(news), disable_web_page_preview=True)
     elif data == "full_analysis":
         symbols = user_watchlists.get(chat_id, Config.DEFAULT_SYMBOLS[:2])
         for sym in symbols[:2]:
-            signal = loop.run_until_complete(analyzer.get_signal(sym))
-            query.message.reply_text(format_signal(signal))
-    loop.close()
+            signal = await analyzer.get_signal(sym)
+            await query.message.reply_text(format_signal(signal))
 
 def main():
-    updater = Updater(Config.TELEGRAM_TOKEN)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("signal", signal_command))
-    dp.add_handler(CommandHandler("news", news_command))
-    dp.add_handler(CallbackQueryHandler(button_callback))
+    app = Application.builder().token(Config.TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("signal", signal_command))
+    app.add_handler(CommandHandler("news", news_command))
+    app.add_handler(CallbackQueryHandler(button_callback))
     logger.info("Bot demarre!")
-    updater.start_polling()
-    updater.idle()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
